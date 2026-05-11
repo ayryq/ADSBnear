@@ -10,26 +10,33 @@ import board
 from lcd.lcd import LCD
 from lcd.i2c_pcf8574_interface import I2CPCF8574Interface
 
+import busio #added for pico w
+
 # ─────────────── USER SETTINGS ─────────────── #
 
 # Data source: "api" for adsb.lol, "local" for a local ADS-B receiver
-DATA_SOURCE         = "api"
+DATA_SOURCE         = "local"
 
 # API settings (used when DATA_SOURCE = "api")
-API_RADIUS_KM       = 7       # search radius for API queries
+API_RADIUS_KM       = 16       # search radius for API queries
+API_RADIUS_NM       = 9 #ayryq
+
+
 
 # Local receiver settings (used when DATA_SOURCE = "local")
 # Common URLs:
 #   tar1090 / readsb:  http://<ip>/tar1090/data/aircraft.json
 #   dump1090-fa:        http://<ip>/dump1090-fa/data/aircraft.json
 #   dump1090 (default): http://<ip>:8080/data/aircraft.json
-LOCAL_ADSB_URL      = "http://192.168.1.100/tar1090/data/aircraft.json"
+LOCAL_ADSB_URL      = "http://192.168.1.155/tar1090/data/aircraft.json"
 LOCAL_AC_MSG_RATE   = False   # show per-aircraft msg/s instead of speed (local mode only)
 ALTERNATE_ROUTE     = False   # alternate line 1 between callsign and route
 ROUTE_CALLSIGN_SEC  = 2.0     # seconds to show callsign
 ROUTE_DISPLAY_SEC   = 2.0     # seconds to show route
 
-DISPLAY_RADIUS_KM   = 10      # max distance (km) to show on display
+MAX_ALTITUDE        = 18000   #ayryq
+
+DISPLAY_RADIUS_KM   = 16      # max distance (km) to show on display #ayryq use 16 to keep NM to one digit
 
 WIFI_SSID           = "CHANGEME"
 WIFI_PASSWORD       = "CHANGEME"
@@ -81,14 +88,26 @@ LEVEL_ARROW = [
     0b00000,
 ]
 
+DEGREES = [ #ayryq
+    0b01110,
+    0b01010,
+    0b01110,
+    0b00000,
+    0b00000,
+    0b00000,
+    0b00000,
+    0b00000,
+]
 # ─────────────── LCD SETUP ─────────────── #
 
-i2c       = board.I2C()
+i2c = busio.I2C(board.GP1, board.GP0)  #adapted for pico W
+#i2c = board.I2C()
 interface = I2CPCF8574Interface(i2c, LCD_I2C_ADDRESS)
 lcd       = LCD(interface, num_rows=2, num_cols=16)
 lcd.create_char(0, UP_ARROW)
 lcd.create_char(1, DOWN_ARROW)
 lcd.create_char(2, LEVEL_ARROW)
+lcd.create_char(3, DEGREES) #ayryq
 
 lcd.clear()
 lcd.print("    ADSBnear")
@@ -189,7 +208,8 @@ def kn_to_kmh(kn):
     return kn * 1.852
 
 def api_url():
-    return f"https://api.adsb.lol/v2/closest/{LATITUDE:.6f}/{LONGITUDE:.6f}/{API_RADIUS_KM}"
+    return f"https://api.adsb.lol/v2/closest/{LATITUDE:.6f}/{LONGITUDE:.6f}/{API_RADIUS_KM}" 
+    #return f"https://re-api.adsb.lol/?closest={LATITUDE:.6f},{LONGITUDE:.6f},{API_RADIUS_NM}" 
 
 # ──────── LCD TEXT HELPERS (16x2) ───────── #
 
@@ -249,11 +269,12 @@ def _build_line1(label, dist_str, type_code):
     dist and type stay pinned at the same position on every alternation.
     Layout: [label slot][space][dist]km [type]
     The slot width = 16 - 1 - len(dist_str) - 3 - len(type_code)."""
-    slot = max(1, 16 - 1 - len(dist_str) - 3 - len(type_code))
+    #slot = max(1, 16 - 1 - len(dist_str) - 3 - len(type_code)) #ayryq
+    slot = 7 #ayryq
     label = label[:slot]
     label = label + " " * (slot - len(label))  # pad to fixed slot width
-    return pad16(f"{label} {dist_str}km {type_code}")
-
+    #return pad16(f"{label} {dist_str}km {type_code}")
+    return pad16(f"{label} {dist_str} {type_code}") #ayryq
 
 def format_lcd(ac, ac_msg_rate=None, route=None):
     global _last_alt, _last_flight
@@ -261,7 +282,29 @@ def format_lcd(ac, ac_msg_rate=None, route=None):
     lat    = to_float(ac.get("lat"))
     lon    = to_float(ac.get("lon"))
     gs_kn  = to_float(ac.get("gs"))
-    alt_ft = to_float(ac.get("alt_geom") or ac.get("alt_baro"))
+    alt_ft = to_float(ac.get("alt_baro") or ac.get("alt_geom")) #ayryq swapped order
+    track   = round(to_float(ac.get("track"))) #ayryq
+
+    brg = bearing_deg(LATITUDE, LONGITUDE, lat, lon) #ayryq
+    if math.isnan(brg): #ayryq
+        brg_str = "--"
+    elif 22.5 <= brg < 67.5:
+        brg_str = "NE"
+    elif 67.5 <= brg < 112.5:
+        brg_str = "E "
+    elif 112.5 <= brg < 157.5:
+        brg_str = "SE"
+    elif 157.5 <= brg < 202.5:
+        brg_str = "S "
+    elif 202.5 <= brg < 247.5:
+        brg_str = "SW"
+    elif 247.5 <= brg < 292.5:
+        brg_str = "W "
+    elif 292.5 <= brg < 337.5:
+        brg_str = "NW"
+    else:
+        brg_str = "N "
+
 
     if math.isnan(gs_kn):
         gs_kn = 0.0
@@ -269,7 +312,9 @@ def format_lcd(ac, ac_msg_rate=None, route=None):
         alt_ft = 0.0
 
     dist = gc_distance_km(LATITUDE, LONGITUDE, lat, lon)
-    dist_str = "--" if math.isnan(dist) else str(int(dist + 0.5))
+    #dist_str = "--" if math.isnan(dist) else str(int(dist + 0.5))
+    dist_str = "--" if math.isnan(dist) else str(int(dist*.54 + 0.5)) #ayryq (convert back to nautical miles)
+    dist_str = dist_str + brg_str #ayryq (add bearing)
 
     flt_raw = (ac.get("flight") or "????").strip()[:7]
 
@@ -309,12 +354,15 @@ def format_lcd(ac, ac_msg_rate=None, route=None):
         else:
             spd_str = f"{int(ac_msg_rate)}msg/s"
     else:
-        spd_str = f"{int(gs_kmh + 0.5):3d}km/h"
-    line2 = f"{int(alt_m + 0.5):5d}m{arrow} {spd_str}"
+        #spd_str = f"{int(gs_kmh + 0.5):3d}km/h"
+        spd_str = f"{int(gs_kn + 0.5):3d}kt" #ayryq
+        
+    #line2 = f"{int(alt_m + 0.5):5d}m{arrow} {spd_str}" #ayryq commented
+    fl=round(int(alt_ft)/100) #ayryq "flight level" hundreds of feet
+    line2 = f"{fl:03d}{arrow} {spd_str}  {track:03d}{chr(3)}" #ayryq (altitude in hundreds of feet, added track)
     line2 = pad16(line2)
 
     return line1, line2, route_line1
-
 
 def format_console(ac):
     lat     = to_float(ac.get("lat"))
@@ -322,6 +370,7 @@ def format_console(ac):
     api_dst = to_float(ac.get("dst"))
     gs_kn   = to_float(ac.get("gs"))
     alt_ft  = to_float(ac.get("alt_geom") or ac.get("alt_baro"))
+    track   = round(to_float(ac.get("track"))) #ayryq
 
     if math.isnan(gs_kn):
         gs_kn = 0.0
@@ -342,15 +391,34 @@ def format_console(ac):
         return "---" if math.isnan(x) else f"{x:5.1f}"
 
     brg = bearing_deg(LATITUDE, LONGITUDE, lat, lon)
-    brg_str = "---" if math.isnan(brg) else f"{brg:05.1f}\u00b0"
-
+    #brg_str = "---" if math.isnan(brg) else f"{brg:05.1f}\u00b0" #ayryq
+    if math.isnan(brg): #ayryq
+        brg_str = "--"
+    elif 22.5 <= brg < 67.5:
+        brg_str = "NE"
+    elif 67.5 <= brg < 112.5:
+        brg_str = "E "
+    elif 112.5 <= brg < 157.5:
+        brg_str = "SE"
+    elif 157.5 <= brg < 202.5:
+        brg_str = "S "
+    elif 202.5 <= brg < 247.5:
+        brg_str = "SW"
+    elif 247.5 <= brg < 292.5:
+        brg_str = "W "
+    elif 292.5 <= brg < 337.5:
+        brg_str = "NW"
+    else:
+        brg_str = "N "
+    
+    
     dst_str = fmt(dist_km) + " km"
     if not math.isnan(api_dst):
         dst_str += f" (API {fmt(api_dst)})"
 
     return (
         f"{flt:<8}  {type_str}{reg:<6}  "
-      + f"{dst_str}  {brg_str}  "
+      + f"{dst_str}{brg_str}  "
       + f"{alt_ft:5.0f} ft ({alt_m:4.0f} m)  "
       + f"{gs_kn:3.0f} kn / {gs_kmh:3.0f} km/h"
     )
@@ -395,8 +463,11 @@ def _fetch_local():
     for ac in aircraft_list:
         lat = to_float(ac.get("lat"))
         lon = to_float(ac.get("lon"))
+        alt = to_float(ac.get("alt_baro"))#ayryq
         if math.isnan(lat) or math.isnan(lon):
             continue
+        if alt > MAX_ALTITUDE: #ayryq
+            continue #ayryq
         dist = gc_distance_km(LATITUDE, LONGITUDE, lat, lon)
         if not math.isnan(dist) and dist <= DISPLAY_RADIUS_KM:
             nearby.append((dist, ac))
@@ -412,15 +483,15 @@ def show_no_planes():
 
     if _last_seen_flight:
         ago = fmt_duration(now - _last_seen_time)
-        left1 = f"Last:{_last_seen_flight}"
-        gap1 = max(16 - len(left1) - len(ago), 1)
-        line1 = (left1 + " " * gap1 + ago)[:16]
+        left1 = f"{_last_seen_flight}" #ayryq
+        gap1 = max(16 - len(left1) - len(ago) - 4, 1) #ayryq
+        line1 = (left1 + " " * gap1 + ago + " ago")[:16] #ayryq
     else:
-        line1 = "  Scanning...   "
+        line1 = "No aircraft yet" #ayryq
 
     left2 = f"{_planes_seen} seen"
     if DATA_SOURCE == "local" and _msg_rate is not None:
-        right2 = f"{_msg_rate:.1f}msgs"
+        right2 = f"{_msg_rate:.0f}msg/s" #ayryq
     else:
         right2 = f"Up:{fmt_duration(uptime)}"
     gap2 = max(16 - len(left2) - len(right2), 1)
@@ -428,8 +499,8 @@ def show_no_planes():
 
     lcd.clear()
     lcd.print(pad16(line1))
-    lcd.set_cursor_pos(1, 0)
-    lcd.print(pad16(line2))
+    #lcd.set_cursor_pos(1, 0) #ayryq
+    #lcd.print(pad16(line2)) #ayryq no line 2 to make it more obvious when aircraft is visible 
 
 # ──────────────── MAIN LOOP ────────────────── #
 
@@ -483,7 +554,7 @@ while True:
 
         if not plane_displayed:
             show_no_planes()
-            print(timestr, f"No aircraft within {DISPLAY_RADIUS_KM} km")
+            print(timestr, f"No aircraft within {DISPLAY_RADIUS_KM} km below {MAX_ALTITUDE} ft") #ayryq
 
         next_poll = POLL_SEC if plane_displayed else NO_PLANE_POLL_SEC
 
